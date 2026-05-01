@@ -30,30 +30,33 @@ app.post('/api/report', (req, res) => {
 app.get('/api/servers/:placeId', async (req, res) => {
     try {
         const placeId = req.params.placeId;
-        const url = `https://games.roblox.com/v1/games/${placeId}/servers/Public?sortOrder=Asc&limit=100`;
-        
-        // Hole die echten Daten von Roblox
-        const response = await axios.get(url);
-        let servers = response.data.data;
+        let allServers = [];
+        let cursor = null;
+        let pagesToScan = 5; // Er scannt die ersten 500 Server (5 Seiten à 100)
 
-        // MAGIE: Wir überschreiben die Roblox-Daten mit UNSERER Datenbank!
-        if (servers) {
-            servers = servers.map(server => {
-                // Wenn wir diesen Server schon kennen...
-                if (serverDatabase[server.id]) {
-                    server.isKnown = true;
-                    server.knownRegion = serverDatabase[server.id];
-                }
-                return server;
-            });
+        for (let i = 0; i < pagesToScan; i++) {
+            const url = `https://games.roblox.com/v1/games/${placeId}/servers/Public?sortOrder=Asc&limit=100${cursor ? `&cursor=${cursor}` : ''}`;
+            const response = await axios.get(url);
+            
+            if (response.data.data) {
+                allServers = allServers.concat(response.data.data);
+            }
+
+            cursor = response.data.nextPageCursor;
+            if (!cursor) break; // Keine weiteren Seiten mehr da
         }
 
-        res.json({ data: servers });
+        // Ab hier wie vorher: Mit Datenbank abgleichen
+        const processedServers = allServers.map(server => {
+            if (serverDatabase[server.id]) {
+                server.isKnown = true;
+                server.knownRegion = serverDatabase[server.id];
+            }
+            return server;
+        });
+
+        res.json({ data: processedServers });
     } catch (error) {
-        console.error("Fehler:", error.message);
-        res.status(500).json({ error: "Fehler beim Abrufen der Roblox API" });
+        res.status(500).json({ error: "Deep Scan fehlgeschlagen" });
     }
 });
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server läuft auf Port ${PORT}`));
