@@ -26,21 +26,15 @@ const VerifiedServer = mongoose.model('VerifiedServer', ServerSchema);
 // --- API ROUTEN ---
 
 // 1. Server melden & permanent speichern
-app.post('/api/report', async (req, res) => {
-    const { instanceId, region } = req.body;
+// 3. Falsche Daten löschen (Müllabfuhr)
+app.delete('/api/remove/:instanceId', async (req, res) => {
     try {
-        // "upsert" bedeutet: Wenn vorhanden aktualisieren, sonst neu erstellen
-        await VerifiedServer.findOneAndUpdate(
-            { instanceId },
-            { region, createdAt: new Date() },
-            { upsert: true }
-        );
-        res.json({ success: true });
+        await VerifiedServer.deleteOne({ instanceId: req.params.instanceId });
+        res.json({ success: true, message: "Server aus Datenbank gelöscht" });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }
 });
-
 // 2. Server abrufen & mit Datenbank abgleichen
 app.get('/api/servers/:placeId', async (req, res) => {
     try {
