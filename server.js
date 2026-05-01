@@ -1,62 +1,102 @@
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
+const mongoose = require('mongoose');
 
 const app = express();
 app.use(cors());
-// GANZ WICHTIG: Erlaubt dem Server, JSON-Daten vom Add-on zu empfangen!
-app.use(express.json()); 
+app.use(express.json());
 
-// Unsere Mini-Datenbank (Speichert die Zuordnung: Instanz-ID -> Region)
-// Hinweis: Da wir noch keine echte Datenbank wie MongoDB nutzen, 
-// löscht sich dieser Speicher, wenn der Render-Server neu startet. Fürs Testen reicht das aber!
-const serverDatabase = {};
+// --- DATENBANK VERBINDUNG ---
+const mongoURI = "mongodb+srv://alendmohamed68_db_user:calais12was@cluster0.fzdnsgb.mongodb.net/roblox_data?retryWrites=true&w=majority";
 
-// 1. NEUER ENDPUNKT: Daten EMPFANGEN (POST)
-app.post('/api/report', (req, res) => {
+mongoose.connect(mongoURI)
+    .then(() => console.log("✅ Erfolgreich mit MongoDB verbunden!"))
+    .catch(err => console.error("❌ MongoDB Verbindungsfehler:", err));
+
+// Schema erstellen: Was wollen wir speichern?
+const ServerSchema = new mongoose.Schema({
+    instanceId: { type: String, unique: true, required: true },
+    region: String,
+    createdAt: { type: Date, default: Date.now }
+});
+
+const VerifiedServer = mongoose.model('VerifiedServer', ServerSchema);
+
+// --- API ROUTEN ---
+
+// 1. Server melden & permanent speichern
+app.post('/api/report', async (req, res) => {
     const { instanceId, region } = req.body;
-    
-    if (instanceId && region) {
-        // Speichere die Info in unserer Datenbank ab
-        serverDatabase[instanceId] = region;
-        console.log(`🔥 NEUER EINTRAG: Server ${instanceId} ist in ${region}`);
-        res.json({ success: true, message: "Erfolgreich in der Datenbank gespeichert!" });
-    } else {
-        res.status(400).json({ error: "Fehlende Daten" });
+    try {
+        // "upsert" bedeutet: Wenn vorhanden aktualisieren, sonst neu erstellen
+        await VerifiedServer.findOneAndUpdate(
+            { instanceId },
+            { region, createdAt: new Date() },
+            { upsert: true }
+        );
+        res.json({ success: true });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
     }
 });
 
-// 2. ALTER ENDPUNKT: Daten SENDEN (GET)
+// 2. Server abrufen & mit Datenbank abgleichen
 app.get('/api/servers/:placeId', async (req, res) => {
     try {
         const placeId = req.params.placeId;
         let allServers = [];
         let cursor = null;
-        let pagesToScan = 5; // Er scannt die ersten 500 Server (5 Seiten à 100)
-
-        for (let i = 0; i < pagesToScan; i++) {
+        
+        // Deep Scan: Wir holen die ersten 3 Seiten (300 Server)
+        for (let i = 0; i < 3; i++) {
             const url = `https://games.roblox.com/v1/games/${placeId}/servers/Public?sortOrder=Asc&limit=100${cursor ? `&cursor=${cursor}` : ''}`;
             const response = await axios.get(url);
-            
-            if (response.data.data) {
-                allServers = allServers.concat(response.data.data);
-            }
-
+            if (response.data.data) allServers = allServers.concat(response.data.data);
             cursor = response.data.nextPageCursor;
-            if (!cursor) break; // Keine weiteren Seiten mehr da
+            if (!cursor) break;
         }
 
-        // Ab hier wie vorher: Mit Datenbank abgleichen
+        // Alle IDs der gefundenen Server extrahieren
+        const foundIds = allServers.map(s => s.id);
+
+        // In der MongoDB schauen, welche dieser IDs wir bereits kennen
+        const knownServers = await VerifiedServer.find({ instanceId: { $in: foundIds } });
+        
+        // Map erstellen für schnellen Zugriff
+        const knownMap = {};
+        knownServers.forEach(s => { knownMap[s.instanceId] = s.region; });
+
+        // Daten zusammenführen
         const processedServers = allServers.map(server => {
-            if (serverDatabase[server.id]) {
-                server.isKnown = true;
-                server.knownRegion = serverDatabase[server.id];
-            }
-            return server;
+            const isKnown = !!knownMap[server.id];
+            
+            // Region-Schätzung (wie bisher)
+            let estimatedRegion = "unknown";
+            let regionLabel = "Unbekannt";
+            if (server.ping <= 80) { estimatedRegion = "eu"; regionLabel = "🇪🇺 Frankfurt/EU"; }
+            else if (server.ping <= 130) { estimatedRegion = "us-east"; regionLabel = "🇺🇸 US Ost"; }
+
+            return { 
+                ...server, 
+                isKnown, 
+                estimatedRegion, 
+                regionLabel 
+            };
         });
 
-        res.json({ data: processedServers });
+        // Sortierung: Verifizierte nach oben, dann nach Ping
+        processedServers.sort((a, b) => {
+            if (a.isKnown && !b.isKnown) return -1;
+            if (!a.isKnown && b.isKnown) return 1;
+            return a.ping - b.ping;
+        });
+
+        res.json({ data: processedServers.slice(0, 15) }); // Top 15 zurückgeben
     } catch (error) {
-        res.status(500).json({ error: "Deep Scan fehlgeschlagen" });
+        res.status(500).json({ error: error.message });
     }
 });
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Server läuft auf Port ${PORT}`));
